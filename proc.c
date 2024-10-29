@@ -14,6 +14,29 @@ struct {
 
 static struct proc *initproc;
 
+const int weights[] = 
+{
+  /* 0 */ 88761, 71755, 56483, 46273, 36291, 
+  /* 5 */ 29154, 23254, 18705, 14949, 11916, 
+  /* 10 */ 9548, 7620, 6100, 4904, 3906, 
+  /* 15 */ 3121, 2501, 1991, 1586, 1277, 
+  /* 20 */ 1024, 820, 655, 526, 423, 
+  /* 25 */ 335, 272, 215, 172, 137, 
+  /* 30 */ 110, 87, 70, 56, 45, 
+  /* 35 */ 36, 29, 23, 18, 15
+};
+
+int get_total_weight(){ //get total weight where process is runnable
+  struct proc* p;
+  int sum_weight = 0;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if(p->state == RUNNABLE) {
+      sum_weight += p->weight;
+    }
+  }
+  return sum_weight;
+}
+
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
@@ -112,6 +135,11 @@ found:
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
   p->nice = 20; //set default value 20
+  p->weight = weights[p->nice];
+  p->runtime = 0;
+  p->total_runtime = 0;
+  p->vruntime = 0;
+  p->timeslice = 0;
 
   return p;
 }
@@ -200,7 +228,11 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
-
+  np->nice = curproc->nice;
+  np->vruntime = curproc->vruntime;
+  np->runtime = curproc->runtime;
+  np->total_runtime = curproc -> total_runtime;
+  np->weight = curproc->weight;
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
 
@@ -325,6 +357,7 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
+
   c->proc = 0;
   
   for(;;){
@@ -333,28 +366,38 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    
+    struct proc *minVRuntimeP = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+      //find minimum virtual runtime from runnable processes
+      if(minVRuntimeP == 0 || p->vruntime < minVRuntimeP->vruntime){
+        minVRuntimeP = p;
+      }
     }
-    release(&ptable.lock);
+      if(minVRuntimeP){
+        p = minVRuntimeP;
+        p->timeslice = (1000*10*p->weight) / get_total_weight();
+      
+        // Switch to chosen process.  It is the process's job
+        // to release ptable.lock and then reacquire it
+        // before jumping back to us.
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
 
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+      }
+    release(&ptable.lock);
   }
 }
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
@@ -387,6 +430,7 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
+  myproc()->runtime = 0;
   myproc()->state = RUNNABLE;
   sched();
   release(&ptable.lock);
@@ -459,10 +503,28 @@ static void
 wakeup1(void *chan)
 {
   struct proc *p;
+  struct proc *minVRuntimeP = 0;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
 
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+      if(minVRuntimeP == 0 || p->vruntime < minVRuntimeP->vruntime){
+        minVRuntimeP = p;
+      }
+  }
+
+  int vruntime_one_tick;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+      if(minVRuntimeP){ // there exists running process
+        vruntime_one_tick = 1000 * 1024 / p->weight;
+        p->vruntime = minVRuntimeP->vruntime - vruntime_one_tick;
+      }else{
+        p->vruntime = 0;
+      }
+    }
+  }
 }
 
 // Wake up all processes sleeping on chan.
@@ -562,6 +624,7 @@ setnice(int pid, int value)
   {
     if(p->pid == pid){
       p->nice = value;
+      p->weight = weights[p->nice];
       release(&ptable.lock);
       return 0;
     }
@@ -591,12 +654,12 @@ ps(int pid)
     {
       if(isPrintHeader == 1)
       {
-        cprintf("name\tpid\tstate\t\tpriority\n");
+        cprintf("name\tpid\tstate\t\tpriority\truntime/weight\truntime\t\tvruntime\ttick:%d\n", ticks*1000);
         isPrintHeader = 0;
       }
       if(p->state != UNUSED)
       {
-        cprintf("%s\t%d\t%s\t%d\n", p->name, p->pid, states[p->state], p->nice);
+        cprintf("%s\t%d\t%s\t   %d\t\t\t%d\t   %d          %d\n", p->name, p->pid, states[p->state], p->nice, p->total_runtime/p->weight, p->total_runtime, p->vruntime);
       }
     }
   }
