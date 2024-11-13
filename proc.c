@@ -6,6 +6,10 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+
 
 struct {
   struct spinlock lock;
@@ -13,6 +17,8 @@ struct {
 } ptable;
 
 static struct proc *initproc;
+
+struct mmap_area mmap_areas[MAX_OF_MMAP_ARRAY];
 
 int nextpid = 1;
 extern void forkret(void);
@@ -153,6 +159,210 @@ userinit(void)
   release(&ptable.lock);
 }
 
+// file 기반 매핑 초기화 함수
+int initialize_file_mapping(struct proc *proc, uint start_addr, int len, int prot, struct file *file, int offset, int index) {
+  int total_pages = len / PGSIZE;
+  char *page_memory;
+  file->off = offset;  //save previous data.
+  
+  for (int i = 0; i < total_pages; i++) {
+    if ((page_memory = kalloc()) == 0)
+      return -1;
+    memset(page_memory, 0, PGSIZE);
+    fileread(file, page_memory, PGSIZE);
+   
+    if (mappages(proc->pgdir, (char*)(start_addr + i * PGSIZE), PGSIZE, V2P(page_memory), mmap_areas[index].prot) < 0) {
+      kfree(page_memory);
+      return -1;
+    }
+  }
+  
+  return 0;
+}
+
+// non file 매핑 초기화 함수
+int initialize_anon_mapping(struct proc *proc, uint start_addr, int len, int prot, struct file* f, int offset, int index) {
+  int total_pages = len / PGSIZE;
+  char *page_memory;
+
+  for (int i = 0; i < total_pages; i++) {
+    if ((page_memory = kalloc()) == 0)
+      return -1;
+    memset(page_memory, 0, PGSIZE);
+    
+    if (mappages(proc->pgdir, (char*)(start_addr + i * PGSIZE), PGSIZE, V2P(page_memory), mmap_areas[index].prot) < 0) {
+      kfree(page_memory);
+      return -1;
+    }
+  }
+  
+  return 0;
+}
+
+uint
+mmap(uint addr, int length, int prot, int flags, int fd, int offset)
+{
+  struct proc *p = myproc();
+  struct file *f = 0;
+  uint virtual_addr = addr + MMAPBASE;
+  int mmap_index;
+  if(addr != PGROUNDDOWN(addr)) return 0;
+  if(length != PGROUNDDOWN(length)) return 0;
+
+  if (!(flags & MAP_ANONYMOUS)) {
+    if (fd == -1) return -1;
+    f = filedup(p->ofile[fd]);
+    //validate file 
+    if (!f || !f->readable || (prot & PROT_WRITE && !f->writable))
+      return -1;
+    if((prot & PROT_READ) && !f->readable) 
+      return -1;
+  } else{
+    if(fd != -1) return -1;
+  }
+
+  for (mmap_index = 0; mmap_index < MAX_OF_MMAP_ARRAY; mmap_index++) {
+    if (mmap_areas[mmap_index].p == 0)      
+      break;
+  }
+
+  if (!(flags & MAP_POPULATE)) 
+    return virtual_addr;
+
+
+  mmap_areas[mmap_index].addr = virtual_addr;
+  mmap_areas[mmap_index].length = length;
+  mmap_areas[mmap_index].prot = (prot & PROT_WRITE ? (prot | PTE_W | PTE_U) : (prot | PTE_U));
+  mmap_areas[mmap_index].flags = flags;
+  mmap_areas[mmap_index].offset = offset;
+  mmap_areas[mmap_index].f = f;
+  mmap_areas[mmap_index].p = p;
+  // 메모리 페이지 할당 및 초기화
+  if (!(flags & MAP_ANONYMOUS)) { // 파일 기반 매핑
+    if (initialize_file_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return -1;
+  } else { // 익명 매핑
+    if (initialize_anon_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return -1;
+  }
+
+  return virtual_addr; // 매핑된 주소 반환
+}
+
+int handle_page_fault(uint fault_addr, uint error_code) {
+  struct proc *curr_proc = myproc();
+  struct mmap_area *target = 0;
+  uint va = PGROUNDDOWN(fault_addr);
+  char *new_page;
+
+  for (int i = 0; i < MAX_OF_MMAP_ARRAY; i++) {
+    if (mmap_areas[i].p == curr_proc &&
+        mmap_areas[i].addr <= fault_addr &&
+        fault_addr < mmap_areas[i].addr + mmap_areas[i].length) {
+      target = &mmap_areas[i];
+      break;
+    }
+  }
+  
+  if (!target) {
+    return -1; 
+  }
+  
+  if ((!(target->prot & PROT_WRITE)) && error_code == 1) {
+    return -1; 
+  }
+
+  if ((new_page = kalloc()) == 0) {
+    return 0; 
+  }
+  memset(new_page, 0, PGSIZE);
+
+  if (target->flags & MAP_ANONYMOUS) {
+    if (mappages(curr_proc->pgdir, (void *)va, PGSIZE, V2P(new_page), PTE_W | PTE_U) < 0) {
+      kfree(new_page);
+      return -1;
+    }
+  } else {
+    struct file *f = target->f;
+    uint original_offset = f->off;
+    f->off = target->offset + (va - target->addr);
+
+    if (fileread(f, new_page, PGSIZE) < 0) {
+      kfree(new_page);
+      f->off = original_offset; 
+      return -1;
+    }
+
+    if (mappages(curr_proc->pgdir, (void *)va, PGSIZE, V2P(new_page), PTE_W | PTE_U) < 0) {
+      kfree(new_page);
+      f->off = original_offset;
+      return -1;
+    }
+
+    f->off = original_offset;
+  }
+
+  return 0;
+}
+
+
+
+int
+munmap(uint addr)
+{
+  // 페이지 정렬 확인 및 MMAP_BASE보다 작은 경우 조정
+  if (addr < MMAPBASE) 
+    addr += MMAPBASE;
+
+  if (addr % PGSIZE != 0) 
+    return 0;
+
+  struct proc *curproc = myproc();
+  struct mmap_area *target_area = 0; // 해제할 매핑 영역을 저장할 포인터
+  pte_t *pgtab;
+
+  // mmap_areas 배열에서 현재 프로세스의 addr로 시작하는 매핑을 찾음
+  for (int i = 0; i < MAX_OF_MMAP_ARRAY; i++) {
+    if (mmap_areas[i].p == curproc && mmap_areas[i].addr == addr) {
+      target_area = &mmap_areas[i];
+      break;
+    }
+  }
+
+  // addr이 페이지 정렬되지 않은 경우 실패 반환
+  if (addr != PGROUNDDOWN(addr))
+    return 0;
+
+  // 매핑된 영역이 없는 경우 실패 반환
+  if (!target_area)
+    return -1;
+
+  // 매핑된 모든 페이지 순회하며 할당 해제 수행
+  for (uint a = addr; a < addr + target_area->length; a += PGSIZE) {
+    pgtab = walkpgdir(curproc->pgdir, (char *)a, 0);
+    if (pgtab && (*pgtab & PTE_P)) { // 유효한 매핑 확인 후 해제
+      kfree(P2V(PTE_ADDR(*pgtab)));
+      *pgtab = 0; // 페이지 테이블 엔트리 초기화
+    }
+  }
+
+  // 매핑된 파일이 있는 경우 파일을 닫음
+  if (target_area->f != 0)
+    fileclose(target_area->f);
+
+  // 매핑 영역 정보 초기화
+  target_area->addr = 0;
+  target_area->prot = 0;
+  target_area->length = 0;
+  target_area->offset = 0;
+  target_area->flags = 0;
+  target_area->f = 0;
+  target_area->p = 0;
+
+  return 1; // 성공 시 1 반환
+}
+
+
+
+
 // Grow current process's memory by n bytes.
 // Return 0 on success, -1 on failure.
 int
@@ -218,6 +428,56 @@ fork(void)
 
   release(&ptable.lock);
 
+  // Copy mmap regions from parent to child process
+  for (i = 0; i < MAX_OF_MMAP_ARRAY; i++) {
+    if (mmap_areas[i].p == curproc) {  
+      struct mmap_area *target = 0;
+      int j;
+      // find an empty slot in mmap_areas
+      for (j = 0; j < MAX_OF_MMAP_ARRAY; j++) {
+        if (mmap_areas[j].p == 0) {
+          target = &mmap_areas[j];      
+          break; 
+        }        
+      }
+      // If no empty slot 
+      if (j == MAX_OF_MMAP_ARRAY) {
+        return -1;
+      }
+      
+      target->f = mmap_areas[i].f;
+      target->addr = mmap_areas[i].addr;
+      target->length = mmap_areas[i].length;
+      target->offset = mmap_areas[i].offset;
+      target->prot = mmap_areas[i].prot;
+      target->flags = mmap_areas[i].flags;
+      target->p = np;
+
+      uint virt_addr = target->addr;
+      int length = target->length;
+      int prot = target->prot;
+      int flags = target->flags;
+      int offset = target->offset;
+      struct file *f = target->f;
+
+      // If MAP_POPULATE flag is not set, return the address without allocating pages
+      if (!(flags & MAP_POPULATE)) {
+        continue;  // Skip to next mmap region
+      }
+      
+      //if map populate
+      if (!(flags & MAP_ANONYMOUS)) {  // File-backed mapping
+        if (initialize_file_mapping(np, virt_addr, length, prot, f, offset, j) < 0) {
+          return -1;
+        }
+      } else {  // Anonymous mapping
+        if (initialize_anon_mapping(np, virt_addr, length, prot, f, offset, j) < 0) {
+          return -1;
+        }
+      }
+    }
+  }
+
   return pid;
 }
 
@@ -242,6 +502,21 @@ exit(void)
     }
   }
 
+  struct mmap_area *tgt = 0;
+  for(int i=0;i<MAX_OF_MMAP_ARRAY; i++){
+    if(mmap_areas[i].p == curproc){
+      tgt = &mmap_areas[i];
+
+      tgt->f = 0;
+      tgt->prot = 0;
+      tgt->addr = 0;
+      tgt->length = 0;
+      tgt->p = 0;
+      tgt->offset = 0;
+      tgt->flags = 0;
+      
+    }
+  }
   begin_op();
   iput(curproc->cwd);
   end_op();

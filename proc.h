@@ -51,6 +51,16 @@ struct proc {
   char name[16];               // Process name (debugging)
 };
 
+struct mmap_area {
+  struct file *f;
+  uint addr;
+  int length;
+  int offset;
+  int prot;
+  int flags;
+  struct proc *p; //the process with this mmap_area
+};
+
 // Process memory is laid out contiguously, low addresses first:
 //   text
 //   original data and bss

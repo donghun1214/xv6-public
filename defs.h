@@ -120,6 +120,11 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+uint            mmap(uint, int, int, int, int, int);
+int             handle_page_fault(uint, uint);
+int             munmap(uint);
+int             freemem(void);
+
 
 // swtch.S
 void            swtch(struct context**, struct context*);
@@ -185,6 +190,8 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
+pte_t*          walkpgdir(pde_t *pgdir, const void *va, int alloc); //search pte with virtual address
+int             mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm); //mapping virtual address with physical address
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

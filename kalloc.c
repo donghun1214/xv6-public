@@ -94,3 +94,17 @@ kalloc(void)
   return (char*)r;
 }
 
+int
+freemem(void)
+{
+  int free_pages = 0;
+  struct run *r;
+
+  // kmem.freelist를 순회하며 사용 가능한 페이지 수를 계산
+  for (r = kmem.freelist; r != 0; r = r->next) {
+    free_pages++;
+  }
+
+  // 여유 페이지 수 반환
+  return free_pages;
+}
