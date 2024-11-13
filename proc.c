@@ -210,15 +210,15 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
   if(length != PGROUNDDOWN(length)) return 0;
 
   if (!(flags & MAP_ANONYMOUS)) {
-    if (fd == -1) return -1;
+    if (fd == -1) return 0;
     f = filedup(p->ofile[fd]);
     //validate file 
     if (!f || !f->readable || (prot & PROT_WRITE && !f->writable))
-      return -1;
+      return 0;
     if((prot & PROT_READ) && !f->readable) 
-      return -1;
+      return 0;
   } else{
-    if(fd != -1) return -1;
+    if(fd != -1) return 0;
   }
 
   for (mmap_index = 0; mmap_index < MAX_OF_MMAP_ARRAY; mmap_index++) {
@@ -239,9 +239,9 @@ mmap(uint addr, int length, int prot, int flags, int fd, int offset)
   mmap_areas[mmap_index].p = p;
   // 메모리 페이지 할당 및 초기화
   if (!(flags & MAP_ANONYMOUS)) { // 파일 기반 매핑
-    if (initialize_file_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return -1;
+    if (initialize_file_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return 0;
   } else { // 익명 매핑
-    if (initialize_anon_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return -1;
+    if (initialize_anon_mapping(p, virtual_addr, length, prot, f, offset, mmap_index) < 0) return 0;
   }
 
   return virtual_addr; // 매핑된 주소 반환
