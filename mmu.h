@@ -178,4 +178,13 @@ struct gatedesc {
   (gate).off_31_16 = (uint)(off) >> 16;                  \
 }
 
+struct page{
+	struct page *next;
+	struct page *prev;
+	pde_t *pgdir;
+	char *vaddr;
+};
+
+
+
 #endif

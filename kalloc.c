@@ -23,6 +23,11 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct page pages[PHYSTOP/PGSIZE];
+struct page *page_lru_head;
+int num_free_pages;
+int num_lru_pages;
+
 // Initialization happens in two phases.
 // 1. main() calls kinit1() while still using entrypgdir to place just
 // the pages mapped by entrypgdir on free list.
@@ -84,9 +89,12 @@ kalloc(void)
 {
   struct run *r;
 
+//try_again:
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
+//  if(!r && reclaim())
+//	  goto try_again;
   if(r)
     kmem.freelist = r->next;
   if(kmem.use_lock)
