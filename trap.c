@@ -77,6 +77,10 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
+  case T_PGFLT:
+    page_fault(rcr2());
+    lapiceoi();
+    break;
 
   //PAGEBREAK: 13
   default:

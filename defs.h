@@ -52,8 +52,8 @@ struct inode*   nameiparent(char*, char*);
 int             readi(struct inode*, char*, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, char*, uint, uint);
-void swapread(char* ptr, int blkno);
-void swapwrite(char* ptr, int blkno);
+void            swapread(char* ptr, int blkno);
+void            swapwrite(char* ptr, int blkno);
 
 // ide.c
 void            ideinit(void);
@@ -70,7 +70,20 @@ char*           kalloc(void);
 void            kfree(char*);
 void            kinit1(void*, void*);
 void            kinit2(void*, void*);
-
+void            page_fault(uint);
+void            initialize_bitmap(void);
+void            initialize_lru_list(void);
+void            clear_accessed_bit(struct page, pte_t);
+struct page*    select_victim_page(void);
+int             find_free_bit(int, int);
+void            set_bit_in_bitmap(int);
+int             bitmap_index(void);
+void            remove_page_from_lru(struct page*);
+int             swap_out_page(struct page*);
+int             reclaim(void);
+void            page_fault(uint);
+void            bitmap_free(int);
+void            swap_in(uint);
 // kbd.c
 void            kbdintr(void);
 
@@ -187,6 +200,6 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
-
+pte_t*          walkpgdir(pde_t*, const void*, int);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
