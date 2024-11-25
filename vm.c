@@ -341,7 +341,6 @@ copyuvm(pde_t *pgdir, uint sz)
      if(!(*pte & PTE_P)){ // Swapped-out pages should also be copied.
       offset = (PTE_ADDR(*pte) >> 12); //calculate parent's index
       if((mem = kalloc()) == 0) {
-        cprintf("copyuvm: out of memory\n");
         goto bad;
       }
       swapread(mem, offset);
