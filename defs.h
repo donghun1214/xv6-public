@@ -8,6 +8,7 @@ struct rtcdate;
 struct spinlock;
 struct sleeplock;
 struct stat;
+struct page;
 struct superblock;
 
 // bio.c
@@ -73,17 +74,19 @@ void            kinit2(void*, void*);
 void            page_fault(uint);
 void            initialize_bitmap(void);
 void            initialize_lru_list(void);
-void            clear_accessed_bit(struct page, pte_t);
-struct page*    select_victim_page(void);
+void            clear_accessed_bit(struct page*, pte_t*);
+int             select_victim_page(void);
 int             find_free_bit(int, int);
 void            set_bit_in_bitmap(int);
 int             bitmap_index(void);
-void            remove_page_from_lru(struct page*);
-int             swap_out_page(struct page*);
+void            move_page_to_lru_tail(struct page*);
+int             swap_out_victim_page(struct page*, pte_t*);
 int             reclaim(void);
-void            page_fault(uint);
 void            bitmap_free(int);
 void            swap_in(uint);
+int             add_to_lru(pde_t*, char*);
+int             lru_remove(pde_t*, char*);
+
 // kbd.c
 void            kbdintr(void);
 

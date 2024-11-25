@@ -32,7 +32,7 @@ seginit(void)
 // Return the address of the PTE in page table pgdir
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page table pages.
-static pte_t *
+pte_t *
 walkpgdir(pde_t *pgdir, const void *va, int alloc)
 {
   pde_t *pde;
@@ -190,6 +190,7 @@ inituvm(pde_t *pgdir, char *init, uint sz)
   memset(mem, 0, PGSIZE);
   mappages(pgdir, 0, PGSIZE, V2P(mem), PTE_W|PTE_U);
   memmove(mem, init, sz);
+  add_to_lru(pgdir, (char*)0);
 }
 
 // Load a program segment into pgdir.  addr must be page-aligned
@@ -244,6 +245,7 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
       kfree(mem);
       return 0;
     }
+    add_to_lru(pgdir, (char*) a);
   }
   return newsz;
 }
@@ -270,6 +272,12 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
       pa = PTE_ADDR(*pte);
       if(pa == 0)
         panic("kfree");
+      if(*pte & PTE_U)
+        lru_remove(pgdir, (char *)a);
+      if(*pte & PTE_S){
+        int off = PTE_ADDR(*pte) >> 12;
+        bitmap_free(off);
+      }
       char *v = P2V(pa);
       kfree(v);
       *pte = 0;
@@ -308,6 +316,7 @@ clearpteu(pde_t *pgdir, char *uva)
   if(pte == 0)
     panic("clearpteu");
   *pte &= ~PTE_U;
+  lru_remove(pgdir, uva);
 }
 
 // Given a parent process's page table, create a copy
@@ -318,6 +327,7 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
+  int offset;
   char *mem;
 
   if((d = setupkvm()) == 0)
@@ -325,16 +335,34 @@ copyuvm(pde_t *pgdir, uint sz)
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
       panic("copyuvm: pte should exist");
-    if(!(*pte & PTE_P))
+    if((!(*pte & PTE_P)) && !(*pte & PTE_S))
       panic("copyuvm: page not present");
-    pa = PTE_ADDR(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
+
+     if(!(*pte & PTE_P)){ // Swapped-out pages should also be copied.
+      offset = (PTE_ADDR(*pte) >> 12); //calculate parent's index
+      if((mem = kalloc()) == 0) {
+        cprintf("copyuvm: out of memory\n");
+        goto bad;
+      }
+      swapread(mem, offset);
+      flags = PTE_FLAGS(*pte) | PTE_P;
+    } else {
+      pa = PTE_ADDR(*pte);
+      flags = PTE_FLAGS(*pte);
+      if((mem = kalloc()) == 0) {
+        goto bad;
+      }
+      memmove(mem, (char*)P2V(pa), PGSIZE);
+    }
     if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
       kfree(mem);
       goto bad;
+    }
+
+    pte = walkpgdir(d, (void *)i, 0);
+    if((*pte&PTE_P)){
+      if((*pte & PTE_U))
+        add_to_lru(d, (char*)i);
     }
   }
   return d;
