@@ -136,7 +136,7 @@ try_again:
       release(&kmem.lock);
     if(reclaim() == 0) goto try_again;
     else{
-      cprintf("Out of memory\n");
+      cprintf("kalloc: out of memory\n");
       return 0;
     }
   }
